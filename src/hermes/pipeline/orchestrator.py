@@ -13,10 +13,10 @@ Phase 7: Assembly
 
 from dataclasses import dataclass
 from typing import Optional
-import asyncio
+import random
 
-from ..constants import Tier, DISTRACTOR_MIX
-from .pass_a import generate_distractors, PassAOutput
+from ..constants import Tier, DISTRACTOR_MIX, CORRECT_POSITIONS
+from .pass_a import generate_distractors, PassAOutput, Distractor, CorrectAnswer
 from .pass_b import compose_stem, PassBOutput
 from .pass_c import generate_flashcard_seeds, PassCOutput
 from .gates import (
@@ -25,8 +25,10 @@ from .gates import (
     RedactionViolationGate,
     ContentQualityGate,
     OptionLengthBalanceGate,
+    ConsistencyGate,
     create_gate_pipeline,
 )
+from .audit import audit_question, AuditVerdict
 
 
 @dataclass
@@ -37,40 +39,36 @@ class QuestionOutput:
     stem_pattern: str
     tier: Tier
     correct_letter: str
-    options: list[dict]  # All 4 options with full metadata
+    options: list[dict]
     flashcard_seeds: list[dict]
     metadata: dict
     gate_results: dict[str, GateResult]
-    audit_verdict: Optional[str] = None  # "ship", "minor_fix", "major_rework", "scrap"
+    audit_verdict: Optional[str] = None
 
 
 @dataclass
 class AnchorBrief:
-    """Anchor brief structure (from goliath anchor_briefs)."""
+    """Anchor brief structure."""
     uid: str
     core_claims: list[str]
-    concepts: list[dict]  # {concept_id, label, description}
-    misconceptions: list[dict]  # {misconception_id, label, type, concepts_involved}
-    question_angles: list[dict]  # {type, description} - tier-keyed
+    concepts: list[dict]
+    misconceptions: list[dict]
+    question_angles: list[dict]
 
 
 class HermesOrchestrator:
-    """Main pipeline orchestrator for HERMES question generation."""
+    """Main pipeline orchestrator."""
 
-    def __init__(self, client, anchor_briefs_dir: str):
+    def __init__(self, client, anchor_briefs_dir: str = "data/anchor_briefs"):
         self.client = client
         self.anchor_briefs_dir = anchor_briefs_dir
         self._brief_cache: dict[str, AnchorBrief] = {}
 
     async def load_anchor_brief(self, anchor_uid: str) -> Optional[AnchorBrief]:
-        """Load anchor brief from disk (or return None if not exists)."""
+        """Load anchor brief from disk (or None if not exists)."""
         if anchor_uid in self._brief_cache:
             return self._brief_cache[anchor_uid]
-
-        # TODO: Implement file loading
-        # Brief path: {anchor_briefs_dir}/{DOMAIN}/{uid}.json
-        # Fallback: return None (use chapter vocab)
-
+        # TODO: Implement file loading from {dir}/{DOMAIN}/{uid}.json
         return None
 
     def get_distractor_mix(self, tier: Tier) -> list[int]:
@@ -80,6 +78,47 @@ class HermesOrchestrator:
         for level, count in enumerate(mix, start=1):
             levels.extend([level] * count)
         return levels
+
+    def assemble_options(
+        self,
+        correct: CorrectAnswer,
+        distractors: list[Distractor],
+        position_index: int,
+    ) -> tuple[list[dict], str]:
+        """Assemble 4 options with correct answer at specified position."""
+        correct_letter = CORRECT_POSITIONS[position_index % len(CORRECT_POSITIONS)]
+
+        # Map distractors to letters (skip correct letter)
+        all_letters = ["A", "B", "C", "D"]
+        distractor_letters = [l for l in all_letters if l != correct_letter]
+
+        options = []
+        for i, d in enumerate(distractors):
+            options.append({
+                "letter": distractor_letters[i],
+                "text": d.text,
+                "is_correct": False,
+                "distractor_level": int(d.distractor_level),
+                "concept_id": d.concept_id,
+                "misconception_id": d.misconception_id,
+                "misconception_type": d.misconception_type,
+                "confused_with": d.confused_with,
+                "explanation": d.explanation,
+            })
+
+        # Add correct answer
+        options.append({
+            "letter": correct_letter,
+            "text": correct.text,
+            "is_correct": True,
+            "concept_id": correct.concept_id,
+            "explanation": correct.explanation,
+        })
+
+        # Sort by letter
+        options.sort(key=lambda o: o["letter"])
+
+        return options, correct_letter
 
     async def generate_question(
         self,
@@ -95,10 +134,11 @@ class HermesOrchestrator:
         tested_concept_description: str,
         misconception_slots: list[dict],
         character_name: Optional[str] = None,
+        run_audit: bool = True,
     ) -> QuestionOutput:
         """Generate a single question through the full pipeline."""
 
-        gate_results: dict[str, GateResult] = {}
+        gate_results = {}
 
         # Phase 1: Pass A - Distractor Design
         pass_a_output = await generate_distractors(
@@ -134,15 +174,17 @@ class HermesOrchestrator:
         expected_levels = self.get_distractor_mix(tier)
         gates = create_gate_pipeline(expected_levels)
 
-        # Build options list for gates
-        options = [
-            {"letter": "A", "text": "", "is_correct": False},  # Placeholder
-        ]
-        # TODO: Assemble full options from pass_a_output + assigned positions
+        # Assemble options
+        position_index = (variant - 1) % 20
+        options, correct_letter = self.assemble_options(
+            pass_a_output.correct_answer,
+            pass_a_output.distractors,
+            position_index,
+        )
 
         # Run gates
         gate_results["StructureGate"] = gates["StructureGate"].validate(
-            pass_b_output.stem, options, "B"  # Placeholder correct letter
+            pass_b_output.stem, options, correct_letter
         )
 
         gate_results["RedactionViolationGate"] = gates["RedactionViolationGate"].validate(
@@ -155,14 +197,45 @@ class HermesOrchestrator:
         )
 
         gate_results["OptionLengthBalanceGate"] = gates["OptionLengthBalanceGate"].validate(
-            options, "B"
+            options, correct_letter
         )
 
-        # Check if any gate failed
-        all_passed = all(r.passed for r in gate_results.values())
+        gate_results["ConsistencyGate"] = gates["ConsistencyGate"].validate(
+            [{"distractor_level": int(d.distractor_level), "misconception_type": d.misconception_type}
+             for d in pass_a_output.distractors]
+        )
 
-        # Phase 5: Audit (simplified - full audit in separate pass)
-        audit_verdict = "ship" if all_passed else "major_rework"
+        # Check if any hard gate failed
+        hard_fails = [r for r in gate_results.values() if not r.passed and r.severity == "error"]
+
+        # Phase 5: Audit (optional)
+        audit_verdict = None
+        if run_audit:
+            distractor_texts = [d.text for d in pass_a_output.distractors]
+            audit_result = await audit_question(
+                client=self.client,
+                stem=pass_b_output.stem,
+                correct_letter=correct_letter,
+                correct_text=pass_a_output.correct_answer.text,
+                distractor_texts=distractor_texts,
+                tier=tier,
+                stem_pattern=stem_pattern,
+                tested_concept_id=pass_a_output.tested_concept_id,
+                gate_results=gate_results,
+            )
+            audit_verdict = audit_result.verdict
+
+        # Determine final verdict
+        if hard_fails:
+            final_verdict = "major_rework"
+        elif audit_verdict == "scrap":
+            final_verdict = "scrap"
+        elif audit_verdict == "major_rework":
+            final_verdict = "major_rework"
+        elif audit_verdict == "minor_fix":
+            final_verdict = "minor_fix"
+        else:
+            final_verdict = "ship"
 
         # Phase 7: Assembly
         output = QuestionOutput(
@@ -170,7 +243,7 @@ class HermesOrchestrator:
             stem=pass_b_output.stem,
             stem_pattern=stem_pattern,
             tier=tier,
-            correct_letter="B",  # Placeholder
+            correct_letter=correct_letter,
             options=options,
             flashcard_seeds=[
                 {"type": s.seed_type, "front": s.front, "back": s.back}
@@ -180,9 +253,10 @@ class HermesOrchestrator:
                 "anchor_uid": anchor_uid,
                 "tested_concept_id": pass_a_output.tested_concept_id,
                 "tested_concept_label": pass_a_output.tested_concept_label,
+                "knowledge_tested": pass_a_output.knowledge_tested,
             },
             gate_results=gate_results,
-            audit_verdict=audit_verdict,
+            audit_verdict=final_verdict,
         )
 
         return output
