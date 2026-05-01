@@ -1,54 +1,68 @@
 # HERMES Development Journal
 
-## Session 2026-05-01: Phase 2 Complete ✅
-
-**Goal:** Implement core pipeline (Pass A/B/C + gates + orchestrator + CLI)
+## Session 2026-05-01: Phase 2-3 Complete ✅
 
 ### Accomplished
 
-#### Files Created (15 total):
-1. `HERMES_PIPELINE.md` - Comprehensive planning document
-2. `README.md` - Project overview  
-3. `pyproject.toml` - Project config
-4. `src/hermes/__init__.py` - Package init
-5. `src/hermes/constants.py` - Tier, DistractorLevel, MisconceptionType, DISTRACTOR_MIX, BLOOMS_VERBS
-6. `src/hermes/taxonomy.py` - Tier enforcement rules, Bloom's verbs
-7. `src/hermes/pipeline/__init__.py` - Pipeline exports
-8. `src/hermes/pipeline/pass_a.py` - Distractor design + contradictable_facts
-9. `src/hermes/pipeline/pass_b.py` - Stem with redaction (20 patterns)
-10. `src/hermes/pipeline/pass_c.py` - Flashcard seeds
-11. `src/hermes/pipeline/gates.py` - 8+1 validation gates
-12. `src/hermes/pipeline/orchestrator.py` - Pipeline coordinator
-13. `src/hermes/cli.py` - CLI entry point
-14. `tests/__init__.py` - Tests init
-15. `tests/test_gates.py` - Unit tests
+**Phase 2: Core Pipeline** - 15 files created
+- Pass A (distractors), Pass B (stem w/ redaction), Pass C (flashcards)
+- 8+1 gates including RedactionViolationGate
+- Orchestrator, CLI, tests
 
-### Key Implementations
+**Phase 3: Audit + Integration** - 3 files updated/added
+- `src/hermes/pipeline/gates.py` - Fixed `EPONYM_WHITELIST` typo, 140+ names
+- `src/hermes/pipeline/audit.py` - 4-class verdict + Bloom's shape
+- `src/hermes/pipeline/orchestrator.py` - Options assembly, audit wiring
+- `scripts/test_generation.py` - End-to-end test with rich output
 
-**Pass A:** Distractor design, claude-opus-4.7, temp=1.0, extracts contradictable_facts
+### Repository Status
 
-**Pass B:** Stem composition, "NEGATION COUNTS AS PRINTING", 20 stem patterns
+**20 files total:**
 
-**Gates:** Structure, RedactionViolation (NEW), ContentQuality, OptionLengthBalance, Consistency, DistractorMix (soft), Attribution, AnchorGrounding, Uniqueness
+| Category | Files |
+|----------|-------|
+| Planning | `HERMES_PIPELINE.md`, `README.md`, `PHASE_JOURNAL.md`, `pyproject.toml` |
+| Core | `constants.py`, `taxonomy.py`, `cli.py` |
+| Pipeline | `pass_a.py`, `pass_b.py`, `pass_c.py`, `gates.py`, `orchestrator.py`, `audit.py` |
+| Tests | `tests/test_gates.py` |
+| Scripts | `scripts/test_generation.py` |
 
-**CLI:** `hermes generate --anchor-uid X --tier N --variant N --output DIR`
+### Key Features Implemented
 
-### Next Steps
+1. **Distractor-First Architecture** - Pass A generates distractors + extracts contradictable_facts, Pass B composes stem with REDACTION
+2. **20 Stem Patterns** - All patterns defined, tier-keyed
+3. **8+1 Validation Gates** - Structure, RedactionViolation (NEW), ContentQuality, OptionLengthBalance, Consistency, DistractorMix (soft), Attribution (140-name whitelist), AnchorGrounding, Uniqueness
+4. **Audit Pass** - 4-class verdict (ship/minor_fix/major_rework/scrap) + Bloom's shape
+5. **Options Assembly** - Correct answer position cycling (20-position balanced cycle)
+6. **CLI** - `hermes generate --anchor-uid X --tier N`
 
-1. Fix AttributionGate typo (`EPYONYM_WHITELIST` → `EPONYM_WHITELIST`)
-2. Expand eponym whitelist to 140 names
-3. Implement anchor brief loading
-4. Complete orchestrator options assembly
-5. Add audit pass (Phase 5)
-6. Add smart retry (Phase 6)
-7. Run tests: `pytest tests/test_gates.py -v`
-8. Test end-to-end with real anchor + API key
+### Next: Test Run
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+python scripts/test_generation.py --tier 2 --variant 1
+```
+
+This will:
+1. Generate 1 question (Tier 2, variant 1)
+2. Run through Pass A → B → C → gates → audit
+3. Display stem, options table, gate results, verdict
+4. Save to `data/test_runs/UID-T2-V1.json`
 
 ### Validation Targets
 
-| Criterion | Target |
-|-----------|--------|
-| english_gap | 0.0% |
-| Editorial | <20% |
-| Tier fit | ≥80% |
-| Cost | ~$0.30 cached |
+| Criterion | Target | Goliath | Godzilla |
+|-----------|--------|---------|----------|
+| english_gap | 0.0% | 6-9% | 0.0% |
+| Editorial | <20% | 42% | 45% |
+| Tier fit | ≥80% | ~40% | TBD |
+| Cost | ~$0.30 | ~$0.30 | $0.245 |
+
+### Remaining Work
+
+- [ ] Phase 6: Smart Retry (conditional retry logic)
+- [ ] Anchor brief loading from disk
+- [ ] Batch generation script (cohort mode)
+- [ ] Export to CSV/JSON bundles
+- [ ] Run validation cohort (32 questions)
+- [ ] Compare metrics to goliath baseline
